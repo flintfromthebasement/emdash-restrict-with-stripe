@@ -206,7 +206,6 @@ export class StripeClient {
 			"features[invoice_history][enabled]": "true",
 			"features[payment_method_update][enabled]": "true",
 			"features[subscription_cancel][enabled]": "true",
-			"features[subscription_pause][enabled]": "true",
 		});
 		return created.id;
 	}
