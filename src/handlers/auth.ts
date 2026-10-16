@@ -18,6 +18,7 @@ import {
 	createSession,
 	deleteSession,
 } from "../lib/sessions.js";
+import { notePermissionError } from "../lib/permissions.js";
 import { StripeClient } from "../lib/stripe.js";
 import { referencedProductIds } from "../lib/restrictions.js";
 import { appendRawParam, emailLookupVariants, escapeHtml, normalizeEmail, validateReturnPath } from "../lib/validate.js";
@@ -71,6 +72,7 @@ export async function sendLinkHandler(ctx: RCtx): Promise<typeof GENERIC_SENT> {
 		if (!eligible) return GENERIC_SENT;
 	} catch (error) {
 		ctx.log.warn("Stripe lookup for login link failed", { error: String(error) });
+		await notePermissionError(ctx, "login link lookup", error);
 		return GENERIC_SENT;
 	}
 

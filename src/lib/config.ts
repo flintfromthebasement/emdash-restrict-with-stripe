@@ -120,6 +120,8 @@ export async function saveStripeKey(
 		savedAt: new Date().toISOString(),
 	};
 	await ctx.kv.set(CONNECTION_STATE_KEY, state);
+	await ctx.kv.delete(PERMISSION_ERROR_KEY);
+	await ctx.kv.delete(PERMISSION_REPORT_KEY);
 }
 
 export async function clearStripeKey(ctx: Ctx): Promise<void> {
@@ -127,6 +129,8 @@ export async function clearStripeKey(ctx: Ctx): Promise<void> {
 	await ctx.kv.delete(CONNECTION_STATE_KEY);
 	await ctx.kv.delete(PRODUCTS_CACHE_KEY);
 	await ctx.kv.delete(PORTAL_CONFIG_KEY);
+	await ctx.kv.delete(PERMISSION_ERROR_KEY);
+	await ctx.kv.delete(PERMISSION_REPORT_KEY);
 }
 
 export async function getShowExcerpts(ctx: Ctx): Promise<boolean> {
@@ -135,6 +139,8 @@ export async function getShowExcerpts(ctx: Ctx): Promise<boolean> {
 
 export const PRODUCTS_CACHE_KEY = "cache:products";
 export const PORTAL_CONFIG_KEY = "cache:portal-configuration";
+export const PERMISSION_ERROR_KEY = "state:last-permission-error";
+export const PERMISSION_REPORT_KEY = "state:permission-report";
 
 /** Masked description of the stored key; never includes the key itself. */
 export function describeKey(key: string): { type: "secret" | "restricted"; last4: string } {

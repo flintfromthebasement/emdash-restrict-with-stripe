@@ -123,6 +123,11 @@ export class StripeClient {
 		return data as T;
 	}
 
+	/** A read-only GET used to check a restricted key's access (limit=1 on list endpoints). */
+	async probe(path: string): Promise<void> {
+		await this.request("GET", path, path === "/account" ? {} : { limit: "1" });
+	}
+
 	getAccount(): Promise<{ id: string; email?: string | null; settings?: unknown }> {
 		return this.request("GET", "/account");
 	}

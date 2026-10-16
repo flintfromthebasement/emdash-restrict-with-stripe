@@ -8,6 +8,7 @@ import { accessHandler } from "./handlers/access.js";
 import {
 	adminConnectHandler,
 	adminKeyHealthHandler,
+	adminPermissionsHandler,
 	adminProductsHandler,
 	adminRestrictionsHandler,
 	adminSettingsHandler,
@@ -98,6 +99,7 @@ export function createPlugin(_options: Record<string, unknown> = {}) {
 			"admin/products": { methods: POST, handler: adminProductsHandler },
 			"admin/connect": { methods: POST, handler: adminConnectHandler },
 			"admin/key-health": { methods: POST, handler: adminKeyHealthHandler },
+			"admin/permissions": { methods: POST, handler: adminPermissionsHandler },
 		},
 
 		admin: {

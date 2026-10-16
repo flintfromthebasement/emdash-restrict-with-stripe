@@ -1,4 +1,5 @@
 import { type Ctx, fail, type RCtx } from "../lib/context.js";
+import { notePermissionError } from "../lib/permissions.js";
 import { StripeApiError } from "../lib/stripe.js";
 import { isRecord } from "../lib/validate.js";
 
@@ -17,8 +18,9 @@ export async function stripeCall<T>(ctx: Ctx, label: string, fn: () => Promise<T
 				type: error.type,
 				code: error.stripeCode,
 			});
+			await notePermissionError(ctx, label, error);
 			if (error.isAuthError) {
-				fail("STRIPE_KEY_REJECTED", "Stripe rejected this site's API key. An administrator needs to reconnect Stripe.", 502);
+				fail("STRIPE_KEY_REJECTED", "Stripe rejected this site's API key. An administrator needs to update the Stripe connection.", 502);
 			}
 			fail("STRIPE_ERROR", `Stripe could not complete the request (${label}).`, 502);
 		}

@@ -6,6 +6,7 @@ import { type Ctx, fail, type RCtx, requireHttp, store } from "../lib/context.js
 import { sha256Hex } from "../lib/crypto.js";
 import { getRestrictedProductIds } from "../lib/restrictions.js";
 import { getSession, type SessionIdentity } from "../lib/sessions.js";
+import { notePermissionError } from "../lib/permissions.js";
 import { StripeClient } from "../lib/stripe.js";
 import { isShortString } from "../lib/validate.js";
 import { body } from "./util.js";
@@ -68,6 +69,7 @@ export async function identityHasAccess(
 		}
 	} catch (error) {
 		ctx.log.warn("Stripe access lookup failed", { error: String(error) });
+		await notePermissionError(ctx, "access check", error);
 		return { hasAccess: false, error: "STRIPE_UNAVAILABLE" };
 	}
 	return { hasAccess: false };

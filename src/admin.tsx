@@ -5,6 +5,8 @@
 import { apiFetch, parseApiResponse } from "emdash/plugin-utils";
 import * as React from "react";
 
+import { REQUIRED_PERMISSIONS } from "./lib/permission-list.js";
+
 const API = "/_emdash/api/plugins/restrict-with-stripe";
 const STATE_PARAM = "rwstripe_state";
 
@@ -33,13 +35,27 @@ interface Settings {
 	siteUrl: string | null;
 	emailConfigured: boolean;
 	encryptionError: boolean;
+	permissionError: { permission: string | null; operation: string; at: string; message: string } | null;
+	permissionReport: PermissionReport | null;
 }
 
 interface KeyHealth {
 	configured: boolean;
 	ok: boolean;
 	needsReconnect: boolean;
+	needsNewKey: boolean;
+	keyType?: "secret" | "restricted";
+	message?: string;
+	permissionError?: string | null;
 	error?: string;
+}
+
+interface PermissionReport {
+	keyType: "secret" | "restricted";
+	invalidKey: boolean;
+	ok: boolean;
+	checkedAt: string;
+	results: Array<{ label: string; optional: boolean; status: "ok" | "missing" | "unverified" | "error"; message: string }>;
 }
 
 interface Product {
@@ -109,6 +125,70 @@ function Notice({ tone, children }: { tone: "info" | "warn" | "error" | "ok"; ch
 	);
 }
 
+// ─── Restricted key permissions ──────────────────────────────────
+
+const cell: React.CSSProperties = { padding: "4px 8px", borderBottom: "1px solid rgba(127,127,127,0.25)", textAlign: "left", verticalAlign: "top" };
+
+function PermissionChecklist() {
+	return (
+		<table style={{ borderCollapse: "collapse", fontSize: 13, width: "100%", margin: "8px 0" }}>
+			<thead>
+				<tr>
+					<th style={cell}>Resource</th>
+					<th style={cell}>Permission</th>
+					<th style={cell}>Used for</th>
+				</tr>
+			</thead>
+			<tbody>
+				{REQUIRED_PERMISSIONS.map((permission) => (
+					<tr key={permission.resource}>
+						<td style={cell}>{permission.label}</td>
+						<td style={cell}>
+							<strong>{permission.access === "write" ? "Write" : "Read"}</strong>
+							{permission.optional ? " (optional)" : ""}
+						</td>
+						<td style={cell}>{permission.usedFor}</td>
+					</tr>
+				))}
+				<tr>
+					<td style={cell}>Everything else</td>
+					<td style={cell}>
+						<strong>None</strong>
+					</td>
+					<td style={cell}>Not used by this plugin.</td>
+				</tr>
+			</tbody>
+		</table>
+	);
+}
+
+const statusText = { ok: "OK", missing: "Missing", unverified: "Checked on first use", error: "Unknown" } as const;
+const statusColor = { ok: "#059669", missing: "#dc2626", unverified: "#b45309", error: "#b45309" } as const;
+
+function PermissionResults({ report }: { report: PermissionReport }) {
+	if (report.invalidKey) {
+		return <Notice tone="error">Stripe rejected this key, so its permissions could not be checked. Update your restricted key.</Notice>;
+	}
+	return (
+		<>
+			<table style={{ borderCollapse: "collapse", fontSize: 13, width: "100%", margin: "8px 0" }}>
+				<tbody>
+					{report.results.map((result) => (
+						<tr key={result.label}>
+							<td style={cell}>{result.label}</td>
+							<td style={{ ...cell, color: statusColor[result.status], fontWeight: 600, whiteSpace: "nowrap" }}>
+								{result.optional && result.status === "missing" ? "Not granted" : statusText[result.status]}
+							</td>
+							<td style={cell}>{result.message}</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+			<p style={muted}>Checked {new Date(report.checkedAt).toLocaleString()} with read-only requests.</p>
+		</>
+	);
+}
+
 // ─── Settings page ───────────────────────────────────────────────
 
 function readConnectReturn(): { action: "complete-connect" | "complete-disconnect"; params: Record<string, string> } | null {
@@ -130,6 +210,7 @@ function SettingsPage() {
 	const [busy, setBusy] = React.useState(false);
 	const [sandbox, setSandbox] = React.useState(false);
 	const [manualKey, setManualKey] = React.useState("");
+	const [manualOpen, setManualOpen] = React.useState(false);
 
 	const load = React.useCallback(async () => {
 		try {
@@ -173,10 +254,35 @@ function SettingsPage() {
 		setBusy(true);
 		setMessage(null);
 		try {
-			setSettings(await call<Settings>("admin/settings", { action: "save", ...payload }));
+			const next = await call<Settings>("admin/settings", { action: "save", ...payload });
+			setSettings(next);
 			setHealth(await call<KeyHealth>("admin/key-health"));
-			setMessage({ tone: "ok", text: done });
+			const report = payload.secretKey ? next.permissionReport : null;
+			setMessage(
+				report && !report.ok
+					? { tone: "error", text: "Key saved, but it is missing permissions. See the check results below." }
+					: { tone: "ok", text: done },
+			);
 			setManualKey("");
+			setManualOpen(false);
+		} catch (error) {
+			setMessage({ tone: "error", text: errorText(error) });
+		}
+		setBusy(false);
+	};
+
+	const checkPermissions = async () => {
+		setBusy(true);
+		setMessage(null);
+		try {
+			const result = await call<{ report: PermissionReport; settings: Settings }>("admin/permissions");
+			setSettings(result.settings);
+			setHealth(await call<KeyHealth>("admin/key-health"));
+			setMessage(
+				result.report.ok
+					? { tone: "ok", text: "The key has every permission that can be checked without side effects." }
+					: { tone: "error", text: "The key is missing permissions. See the results below." },
+			);
 		} catch (error) {
 			setMessage({ tone: "error", text: errorText(error) });
 		}
@@ -256,6 +362,23 @@ function SettingsPage() {
 								Stripe dashboard. Reconnect to Stripe to restore checkout and access checks.
 							</Notice>
 						)}
+						{health?.needsNewKey && (
+							<Notice tone="error">
+								{health.message}{" "}
+								<button type="button" style={linkButton} onClick={() => setManualOpen(true)}>
+									{health.keyType === "restricted" ? "Update your restricted key" : "Update your key"}
+								</button>
+							</Notice>
+						)}
+						{settings.permissionError && <Notice tone="error">{settings.permissionError.message}</Notice>}
+						{settings.key?.type === "restricted" && (
+							<div style={{ marginTop: 12 }}>
+								<button type="button" style={secondaryButton} disabled={busy} onClick={() => void checkPermissions()}>
+									Check key permissions
+								</button>
+								{settings.permissionReport && <PermissionResults report={settings.permissionReport} />}
+							</div>
+						)}
 						{health?.error && <Notice tone="warn">Could not reach Stripe to check the key.</Notice>}
 						{health?.needsReconnect && connectButtons}
 						<div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
@@ -284,19 +407,38 @@ function SettingsPage() {
 				) : (
 					connectButtons
 				)}
-				<details style={{ marginTop: 16 }}>
-					<summary style={{ cursor: "pointer", fontSize: 14 }}>Enter an API key manually</summary>
+				<details
+					style={{ marginTop: 16 }}
+					open={manualOpen}
+					onToggle={(event) => setManualOpen((event.currentTarget as HTMLDetailsElement).open)}
+				>
+					<summary style={{ cursor: "pointer", fontSize: 14 }}>
+						{settings.key?.type === "restricted" ? "Update your restricted key" : "Use your own Stripe key instead of Connect"}
+					</summary>
+					<p style={{ fontSize: 14, margin: "8px 0" }}>
+						We recommend a restricted key (rk_…). In your{" "}
+						<a
+							href={`https://dashboard.stripe.com/${settings.environment === "sandbox" ? "test/" : ""}apikeys`}
+							target="_blank"
+							rel="noopener noreferrer"
+							style={{ color: "#635bff" }}
+						>
+							Stripe API keys page
+						</a>
+						, click <strong>Create restricted key</strong>, leave every resource at <strong>None</strong> except:
+					</p>
+					<PermissionChecklist />
 					<p style={{ ...muted, margin: "8px 0" }}>
-						Paste a secret key (sk_…) or a restricted key (rk_…) with read access to products, prices, customers,
-						subscriptions, and invoices, and write access to customers, Checkout Sessions, and the customer portal.
-						The key is encrypted with EMDASH_ENCRYPTION_KEY and is never shown again.
+						Write includes Read. A full secret key (sk_…) also works. There is no platform fee either way. The key is
+						encrypted with EMDASH_ENCRYPTION_KEY and is never shown again. Saving a restricted key checks its
+						permissions right away.
 					</p>
 					<input
 						type="password"
 						autoComplete="off"
 						value={manualKey}
 						onChange={(event) => setManualKey(event.target.value)}
-						placeholder="sk_live_…"
+						placeholder="rk_live_…"
 						style={{ width: "100%", padding: "6px 10px", marginBottom: 8, font: "inherit" }}
 					/>
 					<button type="button" style={buttonStyle} disabled={busy || !manualKey.trim()} onClick={() => void save({ secretKey: manualKey.trim() }, "Stripe key saved.")}>

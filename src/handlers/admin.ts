@@ -8,6 +8,8 @@ import {
 	getStripeConfig,
 	isStripeSecretKey,
 	keyEnvironment,
+	type KeySource,
+	PERMISSION_REPORT_KEY,
 	requireStripe,
 	saveStripeKey,
 	SHOW_EXCERPTS_SETTING,
@@ -23,6 +25,12 @@ import {
 	STATE_PARAM,
 } from "../lib/connect.js";
 import { type Ctx, fail, type RCtx, requireHttp, requireSiteOrigin, store } from "../lib/context.js";
+import {
+	checkKeyPermissions,
+	clearPermissionError,
+	lastPermissionError,
+	type PermissionReport,
+} from "../lib/permissions.js";
 import { getActiveProducts } from "../lib/products.js";
 import { listRestrictions, type Restriction, restrictionKey } from "../lib/restrictions.js";
 import { StripeApiError, StripeClient } from "../lib/stripe.js";
@@ -47,6 +55,8 @@ export async function describeSettings(ctx: Ctx) {
 	} catch {
 		encryptionError = true;
 	}
+	const permissionError = config ? await lastPermissionError(ctx, config.keyHash) : null;
+	const storedReport = config ? await ctx.kv.get<StoredReport>(PERMISSION_REPORT_KEY) : null;
 	return {
 		configured: config !== null,
 		keySource: config?.keySource ?? null,
@@ -59,7 +69,28 @@ export async function describeSettings(ctx: Ctx) {
 		siteUrl: siteOriginFrom(ctx.site.url),
 		emailConfigured: Boolean(ctx.email),
 		encryptionError,
+		permissionError,
+		permissionReport: storedReport && storedReport.keyHash === config?.keyHash ? storedReport.report : null,
 	};
+}
+
+type StoredReport = { keyHash: string; report: PermissionReport };
+
+/** Probe the stored key's permissions, remember the report, and clear a fixed runtime error. */
+async function runPermissionCheck(ctx: Ctx): Promise<PermissionReport> {
+	const { config, stripe } = await requireStripe(ctx);
+	const report = await checkKeyPermissions(stripe, config.secretKey);
+	await ctx.kv.set(PERMISSION_REPORT_KEY, { keyHash: config.keyHash, report } satisfies StoredReport);
+	const recorded = await lastPermissionError(ctx, config.keyHash);
+	if (recorded?.permission && report.results.some((r) => r.label === recorded.permission && r.status === "ok")) {
+		await clearPermissionError(ctx);
+	}
+	return report;
+}
+
+export async function adminPermissionsHandler(ctx: RCtx) {
+	const report = await runPermissionCheck(ctx);
+	return { report, settings: await describeSettings(ctx) };
 }
 
 export async function adminSettingsHandler(ctx: RCtx) {
@@ -87,6 +118,13 @@ export async function adminSettingsHandler(ctx: RCtx) {
 					publishableKey: null,
 					connectHashed: false,
 				});
+				if (key.startsWith("rk_")) {
+					try {
+						await runPermissionCheck(ctx);
+					} catch (error) {
+						ctx.log.warn("Permission check after saving a restricted key failed", { error: String(error) });
+					}
+				}
 			}
 			return describeSettings(ctx);
 		}
@@ -128,23 +166,68 @@ async function verifyKey(ctx: Ctx, key: string): Promise<string | null> {
 
 // ─── Key health ──────────────────────────────────────────────────
 
-export async function adminKeyHealthHandler(ctx: RCtx) {
+export type KeyHealth =
+	| { configured: false; ok: false; needsReconnect: false; needsNewKey: false }
+	| {
+			configured: true;
+			ok: boolean;
+			needsReconnect: boolean;
+			needsNewKey: boolean;
+			keySource: KeySource;
+			keyType: "secret" | "restricted";
+			accountId?: string | null;
+			error?: string;
+			message?: string;
+			permissionError?: string | null;
+	  };
+
+/** What admins see when Stripe rejects the stored key: reconnect for Connect, a new key otherwise. */
+export function rejectedKeyHealth(keySource: KeySource, keyType: "secret" | "restricted"): KeyHealth {
+	if (keySource === "connect") {
+		return {
+			configured: true,
+			ok: false,
+			needsReconnect: true,
+			needsNewKey: false,
+			keySource,
+			keyType,
+			message: "Stripe no longer accepts this site's Connect key. Reconnect to Stripe.",
+		};
+	}
+	return {
+		configured: true,
+		ok: false,
+		needsReconnect: false,
+		needsNewKey: true,
+		keySource,
+		keyType,
+		message:
+			keyType === "restricted"
+				? "Stripe rejected your restricted key (revoked, expired, or deleted). Update your restricted key."
+				: "Stripe rejected your secret key (revoked or rolled). Update your secret key.",
+	};
+}
+
+export async function adminKeyHealthHandler(ctx: RCtx): Promise<KeyHealth> {
 	const config = await getStripeConfig(ctx);
-	if (!config) return { configured: false, ok: false, needsReconnect: false };
+	if (!config) return { configured: false, ok: false, needsReconnect: false, needsNewKey: false };
+	const keyType = describeKey(config.secretKey).type;
+	const permissionError = (await lastPermissionError(ctx, config.keyHash))?.message ?? null;
+	const base = { configured: true as const, needsReconnect: false, needsNewKey: false, keySource: config.keySource, keyType, permissionError };
 	const stripe = new StripeClient(config.secretKey, requireHttp(ctx).fetch);
 	try {
 		const account = await stripe.getAccount();
-		return { configured: true, ok: true, needsReconnect: false, accountId: account.id };
+		return { ...base, ok: !permissionError, accountId: account.id };
 	} catch (error) {
 		if (error instanceof StripeApiError && error.isAuthError) {
-			return { configured: true, ok: false, needsReconnect: true, keySource: config.keySource };
+			return rejectedKeyHealth(config.keySource, keyType);
 		}
 		if (error instanceof StripeApiError && error.status === 403) {
 			// Restricted keys without account read access still work for everything else.
-			return { configured: true, ok: true, needsReconnect: false, accountId: config.accountId };
+			return { ...base, ok: !permissionError, accountId: config.accountId };
 		}
 		ctx.log.warn("Stripe key health check failed", { error: String(error) });
-		return { configured: true, ok: false, needsReconnect: false, error: "STRIPE_UNAVAILABLE" };
+		return { ...base, ok: false, error: "STRIPE_UNAVAILABLE" };
 	}
 }
 

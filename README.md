@@ -2,6 +2,8 @@
 
 Sell access to posts and pages with Stripe. Restrict an entry to one or more Stripe products; visitors buy through Stripe Checkout and are logged in when they return, and returning customers log in with an emailed link. It is the EmDash counterpart of the [Restrict With Stripe](https://github.com/strangerstudios/restrict-with-stripe) WordPress plugin and uses the same Stripe Connect server and the same access rule.
 
+**No platform fee.** The plugin never adds an application fee to any Stripe request, whether you connect through Stripe Connect or use your own key. You pay Stripe's normal processing fees and nothing else.
+
 Version 0.2.0 targets **EmDash 1.x** (tested on 1.3.0) as a native plugin.
 
 ## Requirements
@@ -41,8 +43,28 @@ Open **Restrict With Stripe** in the admin sidebar.
 
 - **Connect to Stripe** sends you through `https://connect.restrictwithstripe.com` (tick the sandbox box for test mode). The return URL carries a single-use state value that the plugin issued for your admin account, so a crafted link containing someone else's Stripe keys cannot be saved, and the returned key is checked against Stripe (`GET /v1/account`) before it is stored. The connection is recorded with `supports_hash=1`, so the Connect server keeps only `sha256(access token)`.
 - **Disconnect From Stripe** sends you to the Connect server's confirmation page with `key_hash = sha256(access token)`. Keys stay on the site until the server returns `pmpro_stripe_disconnected=true` for this site's account; if you cancel or sign in to a different account, the keys are kept and the server's message is shown.
-- If Stripe stops accepting the key (revoked or disconnected from the Stripe dashboard), the settings page shows **Reconnect to Stripe**.
-- **Enter an API key manually** accepts a secret key (`sk_…`) or a restricted key (`rk_…`) with read access to products, prices, customers, subscriptions, and invoices, and write access to customers, Checkout Sessions, and the customer portal. The same field is available in EmDash's generated settings form for the plugin.
+- If Stripe stops accepting a Connect key (revoked or disconnected from the Stripe dashboard), the settings page shows **Reconnect to Stripe**. If it stops accepting a key you entered yourself, the page asks you to **update your restricted key** (or secret key) instead.
+- **Use your own Stripe key instead of Connect** accepts a secret key (`sk_…`) or, recommended, a restricted key (`rk_…`). The same field is available in EmDash's generated settings form for the plugin.
+
+### Bring your own restricted key
+
+In the Stripe Dashboard, open **Developers > API keys** ([live](https://dashboard.stripe.com/apikeys), [sandbox](https://dashboard.stripe.com/test/apikeys)), click **Create restricted key**, and set these permissions. Leave every other resource at **None**.
+
+| Resource | Permission | Used for |
+|---|---|---|
+| Products | Read | Product list for restrictions and the paywall (`GET /v1/products`, `GET /v1/prices/:id?expand[]=product`) |
+| Prices | Read | Prices on the paywall and the price being bought (`GET /v1/prices/:id`, `expand[]=data.default_price`) |
+| Customers | Read | Finding a member's customers by email; expanding the Checkout customer (`GET /v1/customers`) |
+| Subscriptions | Read | Access check: active or trialing subscriptions (`GET /v1/subscriptions`) |
+| Invoices | Read | Access check: paid one-time purchases (`GET /v1/invoices`) |
+| Checkout Sessions | Write | Creating Checkout and verifying the buyer's return (`POST /v1/checkout/sessions`, `GET /v1/checkout/sessions/:id`) |
+| Customer Portal | Write | Creating the default portal configuration if none exists, and portal sessions (`/v1/billing_portal/configurations`, `POST /v1/billing_portal/sessions`) |
+| Accounts | Read (optional) | Showing the account ID in settings (`GET /v1/account`); everything works without it |
+| Everything else | None | Not used |
+
+Write includes Read. Permission names follow Stripe's [restricted API keys](https://docs.stripe.com/keys/restricted-api-keys) guide and [permissions reference](https://docs.stripe.com/stripe-apps/reference/permissions) (where Prices appear as the `plan` resource). Nothing here can move money out of the account, issue refunds, or charge application fees.
+
+After a restricted key is saved, the settings page runs **Check key permissions** (`admin/permissions`): one read-only `limit=1` list call per resource, reporting each permission as OK or Missing with the permission Stripe names in its 403. Write permissions (Checkout Sessions, Customer Portal) cannot be tested without creating something, so the check confirms their read half and reports them as "not verifiable until first use". If a live checkout, portal, product, or access call later fails with a permission error, the plugin logs it, records which permission Stripe named (no key material), and shows "Your restricted key is missing Checkout Sessions: Write" on the settings page and in key health. Visitors only see the generic Stripe error.
 
 ## Restrict content
 
@@ -103,7 +125,8 @@ All routes live under `/_emdash/api/plugins/restrict-with-stripe/`. Public route
 | `admin/restrictions` | `plugins:manage` | `{action: "list" \| "get" \| "set" \| "delete", collection, id, productIds}` |
 | `admin/products` | `plugins:manage` | all active Stripe products |
 | `admin/connect` | `plugins:manage` | `{action: "start-connect" \| "start-disconnect" \| "complete-connect" \| "complete-disconnect", …}` |
-| `admin/key-health` | `plugins:manage` | `GET /v1/account` with the stored key; `needsReconnect` on 401 |
+| `admin/key-health` | `plugins:manage` | `GET /v1/account` with the stored key; on 401, `needsReconnect` for Connect keys and `needsNewKey` for keys you entered; includes the last recorded permission error |
+| `admin/permissions` | `plugins:manage` | Read-only permission probe of the stored key; per-permission `ok` / `missing` / `unverified` |
 
 `return_path` must be a path on this site: it must start with a single `/` and contain no backslashes or control characters, and `new URL(return_path, siteUrl)` must stay on the site origin. Errors use EmDash's envelope, `{success: false, error: {code, message}}`, with codes such as `SITE_URL_NOT_CONFIGURED`, `STRIPE_NOT_CONFIGURED`, `EMAIL_NOT_CONFIGURED`, `INVALID_RETURN_PATH`, `PRICE_UNAVAILABLE`, `CHECKOUT_ALREADY_USED`, and `RATE_LIMITED`.
 
