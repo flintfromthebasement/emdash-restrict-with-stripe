@@ -26,6 +26,12 @@ describe("parsePermissionError", () => {
 		expect(parsePermissionError(error)).toEqual({ resource: "checkout_session", access: "write", label: "Checkout Sessions: Write" });
 	});
 	it("maps Stripe's plan resource to Prices and humanizes unknown resources", () => {
+		// Real sandbox wording captured 2026-10-16 (code more_permissions_required).
+		const real = (label: string, id: string) =>
+			new StripeApiError(403, "invalid_request_error", "more_permissions_required", `Permission denied. The provided key 'rk_test_...BkPi' does not have the required permissions for this endpoint on account 'acct_1'. Enabling ${label} ('${id}') permissions on this key would allow this request to continue. You can edit permissions at https://dashboard.stripe.com/b/acct_1?destination=%2Ftest%2Fapikeys%2Fmk_1%2Fedit`);
+		expect(parsePermissionError(real("Charges and Refunds Read", "charge_read"))).toEqual({ resource: "charge", access: "read", label: "Charges and Refunds: Read" });
+		expect(parsePermissionError(real("Prices Read", "plan_read"))?.label).toBe("Prices: Read");
+		expect(parsePermissionError(real("Checkout Sessions Write", "checkout_session_write"))?.label).toBe("Checkout Sessions: Write");
 		expect(parsePermissionError(new StripeApiError(403, undefined, undefined, permissionMessage("rak_plan_read")))?.label).toBe("Prices: Read");
 		expect(parsePermissionError(new StripeApiError(403, undefined, undefined, permissionMessage("rak_tax_rate_read")))?.label).toBe("Tax Rate: Read");
 		expect(parsePermissionError(new StripeApiError(403, undefined, undefined, permissionMessage("customer_portal_write")))?.label).toBe("Customer Portal: Write");

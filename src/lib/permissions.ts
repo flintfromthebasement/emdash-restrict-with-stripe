@@ -28,12 +28,21 @@ export interface ParsedPermission {
 }
 
 // Stripe names the missing permission in the message, e.g.
-// "Having the 'rak_checkout_session_write' permission would allow this request to continue."
-const PERMISSION_IN_MESSAGE = /['"`]?(?:rak_)?([a-z][a-z0-9_]*?)_(read|write)['"`]?\s+permission/;
+// "Enabling Charges and Refunds Read ('charge_read') permissions on this key would allow this request to continue."
+const ENABLING_IN_MESSAGE = /Enabling (.+?) (Read|Write) \(['"`]([a-z][a-z0-9_]*?)_(read|write)['"`]\)/;
+// Older wording: "Having the 'rak_checkout_session_write' permission would allow this request to continue."
+const PERMISSION_IN_MESSAGE = /['"`]?(?:rak_)?([a-z][a-z0-9_]*?)_(read|write)['"`]?\)?\s+permission/;
 
 /** The permission a Stripe 403 says is missing, or null for any other error. */
 export function parsePermissionError(error: unknown): ParsedPermission | null {
 	if (!(error instanceof StripeApiError) || error.status !== 403) return null;
+	const enabling = ENABLING_IN_MESSAGE.exec(error.message);
+	if (enabling) {
+		const resource = enabling[3]!;
+		const access = enabling[4] as Access;
+		const label = LABELS[resource] ? permissionLabel(resource, access) : `${enabling[1]}: ${enabling[2]}`;
+		return { resource, access, label };
+	}
 	const match = PERMISSION_IN_MESSAGE.exec(error.message);
 	if (!match) return null;
 	const resource = match[1]!;
