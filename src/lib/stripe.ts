@@ -28,6 +28,7 @@ export interface StripePrice {
 	active: boolean;
 	currency: string;
 	unit_amount: number | null;
+	custom_unit_amount?: { minimum: number | null; maximum: number | null; preset: number | null } | null;
 	type: "one_time" | "recurring";
 	recurring: { interval: string; interval_count: number } | null;
 	product: string | StripeProduct;

@@ -20,19 +20,24 @@ interface CachedProducts {
 	products: ProductSummary[];
 }
 
-export function formatPrice(price: StripePrice, locale = "en"): string | null {
-	if (price.unit_amount === null) return null;
-	let amount: string;
+function formatAmount(cents: number, currency: string, locale: string): string {
 	try {
-		const formatter = new Intl.NumberFormat(locale, {
-			style: "currency",
-			currency: price.currency.toUpperCase(),
-		});
+		const formatter = new Intl.NumberFormat(locale, { style: "currency", currency: currency.toUpperCase() });
 		const digits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
-		amount = formatter.format(price.unit_amount / 10 ** digits);
+		return formatter.format(cents / 10 ** digits);
 	} catch {
-		amount = `${(price.unit_amount / 100).toFixed(2)} ${price.currency.toUpperCase()}`;
+		return `${(cents / 100).toFixed(2)} ${currency.toUpperCase()}`;
 	}
+}
+
+export function formatPrice(price: StripePrice, locale = "en"): string | null {
+	if (price.unit_amount === null) {
+		// Pay-what-you-want (customer chooses the amount in Checkout).
+		if (!price.custom_unit_amount) return null;
+		const min = price.custom_unit_amount.minimum;
+		return min ? `Pay what you want (min ${formatAmount(min, price.currency, locale)})` : "Pay what you want";
+	}
+	const amount = formatAmount(price.unit_amount, price.currency, locale);
 	if (price.type !== "recurring" || !price.recurring) return amount;
 	const { interval, interval_count: count } = price.recurring;
 	return count === 1 ? `${amount} / ${interval}` : `${amount} every ${count} ${interval}s`;
