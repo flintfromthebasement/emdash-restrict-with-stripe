@@ -364,7 +364,8 @@ function SettingsPage() {
 						)}
 						{health?.needsNewKey && (
 							<Notice tone="error">
-								{health.message}{" "}
+								Stripe no longer accepts this {health.keyType === "restricted" ? "restricted" : "secret"} key. It may have been
+								revoked, rolled, or deleted in the Stripe dashboard.{" "}
 								<button type="button" style={linkButton} onClick={() => setManualOpen(true)}>
 									{health.keyType === "restricted" ? "Update your restricted key" : "Update your key"}
 								</button>
