@@ -46,7 +46,7 @@ Open **Restrict With Stripe** in the admin sidebar.
 
 ## Restrict content
 
-Create products with a default price in Stripe. Then open a saved entry in the admin and use the **Restrict With Stripe** panel in the editor sidebar to tick the products that grant access. **Restricted Content** lists every restricted entry. Restrictions are stored per entry ID (`collection:id`), so renaming a slug does not drop a restriction.
+Create products with a default price in Stripe. Then open a saved entry in the admin and use the **Restrict With Stripe** panel in the editor sidebar to tick the products that grant access. The panel and the admin routes behind it require the `plugins:manage` permission (administrators). **Restricted Content** lists every restricted entry. Restrictions are stored per entry ID (`collection:id`), so renaming a slug does not drop a restriction.
 
 ## How gating works
 

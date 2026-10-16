@@ -567,6 +567,8 @@ export const contentEditorPanels = [
 		id: "restrict-with-stripe",
 		title: "Restrict With Stripe",
 		component: RestrictionPanel,
+		// The restriction routes require plugins:manage, which EmDash grants to administrators.
+		minRole: 50,
 		order: 50,
 	},
 ];
