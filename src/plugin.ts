@@ -3,7 +3,7 @@
 import { definePlugin } from "emdash";
 import type { PageFragmentContribution } from "emdash";
 
-import { PAYWALL_CSS, PENDING_JS, paywallScript } from "./client/paywall.js";
+import { EARLY_JS, ONE_TIME_PARAMS, PAYWALL_CSS, PENDING_JS, paywallScript } from "./client/paywall.js";
 import { accessHandler } from "./handlers/access.js";
 import {
 	adminConnectHandler,
@@ -54,8 +54,18 @@ export function createPlugin(_options: Record<string, unknown> = {}) {
 				const { collection, id, slug } = page.content;
 				const restricted = (await getRestrictedProductIds(ctx, collection, id)).length > 0;
 				const fragments: PageFragmentContribution[] = [
+					{ kind: "inline-script", placement: "head", key: "rwstripe-early", code: EARLY_JS },
 					{ kind: "html", placement: "head", key: "rwstripe-css", html: `<style>${PAYWALL_CSS}</style>` },
 				];
+				if (hasOneTimeParam(page.url)) {
+					// Keep the Checkout Session ID or login token out of Referer headers.
+					fragments.push({
+						kind: "html",
+						placement: "head",
+						key: "rwstripe-referrer",
+						html: `<meta name="referrer" content="no-referrer">`,
+					});
+				}
 				if (restricted) {
 					fragments.push({ kind: "inline-script", placement: "head", key: "rwstripe-pending", code: PENDING_JS });
 				}
@@ -112,6 +122,15 @@ export function createPlugin(_options: Record<string, unknown> = {}) {
 			widgets: [{ id: "overview", title: "Restrict With Stripe", size: "half" }],
 		},
 	});
+}
+
+function hasOneTimeParam(url: string): boolean {
+	try {
+		const { searchParams } = new URL(url);
+		return ONE_TIME_PARAMS.some((name) => searchParams.has(name));
+	} catch {
+		return false;
+	}
 }
 
 export default createPlugin;

@@ -19,7 +19,8 @@ import {
 	deleteSession,
 } from "../lib/sessions.js";
 import { StripeClient } from "../lib/stripe.js";
-import { appendRawParam, escapeHtml, normalizeEmail, validateReturnPath } from "../lib/validate.js";
+import { referencedProductIds } from "../lib/restrictions.js";
+import { appendRawParam, emailLookupVariants, escapeHtml, normalizeEmail, validateReturnPath } from "../lib/validate.js";
 import { body } from "./util.js";
 
 export const LOGIN_PARAM = "rwstripe_login";
@@ -52,18 +53,28 @@ export async function sendLinkHandler(ctx: RCtx): Promise<typeof GENERIC_SENT> {
 	}
 	await maybePurgeExpired(ctx);
 
-	// Only Stripe customers get mail, so the route cannot be used to send login
-	// email to arbitrary addresses. The response is identical either way.
+	// Mail goes only to addresses whose Stripe customers hold a product that restricts
+	// content, so the route cannot send login email to arbitrary addresses (customers
+	// alone are not enough: anyone can create one by completing a free checkout).
+	// The response is identical either way.
+	const lookupEmails = emailLookupVariants(input.email);
 	try {
 		const stripe = new StripeClient(config.secretKey, requireHttp(ctx).fetch);
-		const customers = await stripe.listCustomersByEmail(email);
-		if (!customers.some((customer) => !customer.deleted)) return GENERIC_SENT;
+		const products = [...(await referencedProductIds(ctx))];
+		let eligible = false;
+		for (const customerId of await stripe.customersFor({ customerId: null, lookupEmails })) {
+			if (await stripe.customerHasProduct(customerId, products)) {
+				eligible = true;
+				break;
+			}
+		}
+		if (!eligible) return GENERIC_SENT;
 	} catch (error) {
-		ctx.log.warn("Stripe customer lookup for login link failed", { error: String(error) });
+		ctx.log.warn("Stripe lookup for login link failed", { error: String(error) });
 		return GENERIC_SENT;
 	}
 
-	const token = await createLoginToken(ctx, email, returnPath);
+	const token = await createLoginToken(ctx, email, returnPath, Date.now(), lookupEmails);
 	const link = appendRawParam(`${siteOrigin}${returnPath}`, LOGIN_PARAM, token);
 	await sendLoginEmail(ctx, email, link);
 	return GENERIC_SENT;
@@ -85,8 +96,8 @@ async function sendLoginEmail(ctx: Ctx, to: string, link: string): Promise<void>
 	try {
 		await ctx.email!.send({ to, subject: `Your login link for ${siteName}`, text, html });
 	} catch (error) {
+		// Not surfaced to the caller: a distinct error here would reveal that the address is a customer.
 		ctx.log.error("Login email failed to send", { error: String(error) });
-		fail("EMAIL_SEND_FAILED", "The login email could not be sent. Try again later.", 502);
 	}
 }
 
@@ -101,7 +112,7 @@ export async function verifyHandler(
 	if (!record) {
 		fail("INVALID_LOGIN_LINK", "This login link is invalid, expired, or already used. Request a new one.");
 	}
-	const session = await createSession(ctx, record.email);
+	const session = await createSession(ctx, record.email, Date.now(), { lookupEmails: record.lookupEmails });
 	return { session: session.token, email: record.email, expiresAt: session.expiresAt, returnPath: record.returnPath };
 }
 

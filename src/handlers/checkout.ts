@@ -44,14 +44,12 @@ export async function checkoutHandler(ctx: RCtx): Promise<{ url: string }> {
 		fail("PRICE_UNAVAILABLE", "That product is not available for purchase.");
 	}
 
-	const existing = await stripeCall(ctx, "customer lookup", () => stripe.listCustomersByEmail(email));
-	const customer =
-		existing.find((candidate) => !candidate.deleted) ??
-		(await stripeCall(ctx, "customer creation", () => stripe.createCustomer(email)));
-
+	// The buyer has not proven they own this email, so never attach the checkout to an
+	// existing customer: Stripe creates a fresh one when the session completes, and the
+	// session issued by checkout/complete is scoped to that customer alone.
 	const pageUrl = `${siteOrigin}${returnPath}`;
 	const params: Record<string, string> = {
-		customer: customer.id,
+		customer_email: email,
 		"line_items[0][price]": priceId,
 		"line_items[0][quantity]": "1",
 		success_url: appendRawParam(pageUrl, CHECKOUT_PARAM, "{CHECKOUT_SESSION_ID}"),
@@ -63,6 +61,7 @@ export async function checkoutHandler(ctx: RCtx): Promise<{ url: string }> {
 		params.payment_method_collection = "if_required";
 	} else {
 		params.mode = "payment";
+		params.customer_creation = "always";
 		// Without an invoice, a one-time purchase never shows up as a paid invoice
 		// and customerHasProduct() would not grant access.
 		params["invoice_creation[enabled]"] = "true";
@@ -76,7 +75,7 @@ export async function checkoutHandler(ctx: RCtx): Promise<{ url: string }> {
 }
 
 export type CheckoutVerdict =
-	| { ok: true; email: string }
+	| { ok: true; email: string; customerId: string }
 	| { ok: false; code: string; message: string };
 
 /** Pure checks on a retrieved Checkout Session (everything except single use). */
@@ -94,6 +93,10 @@ export function verifyCheckoutSession(session: StripeCheckoutSession, now = Date
 		return { ok: false, code: "CHECKOUT_EXPIRED", message: "This checkout link has expired. Log in with your email instead." };
 	}
 	const customer = session.customer as StripeCustomer | string | null;
+	const customerId = typeof customer === "string" ? customer : customer?.deleted ? null : (customer?.id ?? null);
+	if (!customerId) {
+		return { ok: false, code: "CHECKOUT_NO_CUSTOMER", message: "Stripe did not create a customer for this checkout." };
+	}
 	const email = normalizeEmail(
 		(typeof customer === "object" && customer && !customer.deleted ? customer.email : null) ??
 			session.customer_details?.email,
@@ -101,7 +104,7 @@ export function verifyCheckoutSession(session: StripeCheckoutSession, now = Date
 	if (!email) {
 		return { ok: false, code: "CHECKOUT_NO_EMAIL", message: "Stripe did not return an email for this checkout." };
 	}
-	return { ok: true, email };
+	return { ok: true, email, customerId };
 }
 
 export async function checkoutCompleteHandler(
@@ -142,6 +145,6 @@ export async function checkoutCompleteHandler(
 	}
 
 	await maybePurgeExpired(ctx);
-	const session = await createSession(ctx, verdict.email, now);
+	const session = await createSession(ctx, verdict.email, now, { customerId: verdict.customerId });
 	return { session: session.token, email: verdict.email, expiresAt: session.expiresAt };
 }

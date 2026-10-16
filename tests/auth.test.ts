@@ -6,7 +6,11 @@ import { createHarness, stripeFetch } from "./support/fake-ctx.js";
 
 const KEY = "sk_test_abcdefghijklmnop";
 
-async function harness(customers: string[], options: Parameters<typeof createHarness>[0] = {}) {
+async function harness(
+	customers: string[],
+	options: Parameters<typeof createHarness>[0] = {},
+	ownedProduct = "prod_A",
+) {
 	const h = createHarness({
 		siteName: `Tom's <Site>`,
 		fetch: stripeFetch({
@@ -15,7 +19,7 @@ async function harness(customers: string[], options: Parameters<typeof createHar
 				has_more: false,
 			}),
 			"GET /subscriptions": () => ({
-				data: [{ status: "active", items: { data: [{ price: { product: "prod_A" } }] } }],
+				data: [{ status: "active", items: { data: [{ price: { product: ownedProduct } }] } }],
 				has_more: false,
 			}),
 			"GET /invoices": () => ({ data: [], has_more: false }),
@@ -23,6 +27,7 @@ async function harness(customers: string[], options: Parameters<typeof createHar
 		...options,
 	});
 	await h.settings.put("stripeSecretKey", KEY);
+	await h.stores.restrictions.put("posts:01ABC", { collectionSlug: "posts", contentId: "01ABC", productIds: ["prod_A"], updatedAt: "" });
 	return h;
 }
 
@@ -47,6 +52,29 @@ describe("auth/send-link", () => {
 		const verified = await verifyHandler(h.withInput({ token }));
 		expect(verified).toMatchObject({ email: "buyer@example.test", returnPath: "/posts/a" });
 		await expect(verifyHandler(h.withInput({ token }))).rejects.toMatchObject({ code: "INVALID_LOGIN_LINK" });
+	});
+
+	it("does not mail customers who hold no restricting product", async () => {
+		const h = await harness(["buyer@example.test"], {}, "prod_UNRELATED");
+		expect(await sendLinkHandler(h.withInput({ email: "buyer@example.test", return_path: "/" }))).toEqual(GENERIC);
+		expect(h.sentEmail).toHaveLength(0);
+	});
+
+	it("finds Stripe customers saved with mixed-case emails", async () => {
+		const h = await harness(["Bob@Example.test"]);
+		await sendLinkHandler(h.withInput({ email: "Bob@Example.test", return_path: "/" }));
+		expect(h.sentEmail).toHaveLength(1);
+		const token = new URL(h.sentEmail[0]!.text.match(/https:\/\/\S+/)![0]).searchParams.get("rwstripe_login");
+		const { session } = await verifyHandler(h.withInput({ token }));
+		expect(await accessHandler(h.withInput({ collection: "posts", id: "01ABC", session }))).toMatchObject({ hasAccess: true, email: "bob@example.test" });
+	});
+
+	it("hides email delivery failures behind the generic answer", async () => {
+		const h = await harness(["buyer@example.test"]);
+		const failing = { send: async () => Promise.reject(new Error("smtp down")) };
+		const ctx = { ...h.withInput({ email: "buyer@example.test", return_path: "/" }), email: failing };
+		expect(await sendLinkHandler(ctx as typeof h.ctx)).toEqual(GENERIC);
+		expect(h.logs.some((entry) => entry.level === "error")).toBe(true);
 	});
 
 	it("answers identically for non-customers and sends nothing", async () => {
@@ -89,7 +117,7 @@ describe("auth/send-link", () => {
 describe("access", () => {
 	it("is unrestricted when no restriction exists", async () => {
 		const h = await harness([]);
-		expect(await accessHandler(h.withInput({ collection: "posts", id: "01ABC" }))).toEqual({
+		expect(await accessHandler(h.withInput({ collection: "posts", id: "OTHER" }))).toEqual({
 			restricted: false,
 			hasAccess: true,
 			productIds: [],
@@ -98,7 +126,6 @@ describe("access", () => {
 
 	it("grants access to a session whose email holds the product", async () => {
 		const h = await harness(["buyer@example.test"]);
-		await h.stores.restrictions.put("posts:01ABC", { collectionSlug: "posts", contentId: "01ABC", productIds: ["prod_A"], updatedAt: "" });
 		expect(await accessHandler(h.withInput({ collection: "posts", id: "01ABC" }))).toMatchObject({ restricted: true, hasAccess: false });
 
 		await sendLinkHandler(h.withInput({ email: "buyer@example.test", return_path: "/" }));

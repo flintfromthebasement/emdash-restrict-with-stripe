@@ -9,12 +9,27 @@ export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface LoginTokenRecord {
 	email: string;
+	/** Spellings to look up in Stripe, whose email filter is case-sensitive. */
+	lookupEmails?: string[];
 	returnPath: string;
 	expiresAt: string;
 }
 
+/**
+ * Who a session speaks for. Magic-link sessions prove control of the email and
+ * cover every Stripe customer with it. Checkout sessions prove only that the
+ * holder paid, so they are scoped to the one customer that Checkout created.
+ */
+export interface SessionIdentity {
+	email: string;
+	customerId: string | null;
+	lookupEmails: string[];
+}
+
 export interface SessionRecord {
 	email: string;
+	customerId?: string | null;
+	lookupEmails?: string[];
 	createdAt: string;
 	expiresAt: string;
 }
@@ -24,10 +39,12 @@ export async function createLoginToken(
 	email: string,
 	returnPath: string,
 	now = Date.now(),
+	lookupEmails: string[] = [email],
 ): Promise<string> {
 	const token = randomToken();
 	await store<LoginTokenRecord>(ctx, "loginTokens").put(await sha256Hex(token), {
 		email,
+		lookupEmails,
 		returnPath,
 		expiresAt: new Date(now + LOGIN_TOKEN_TTL_MS).toISOString(),
 	});
@@ -60,22 +77,29 @@ export async function createSession(
 	ctx: Ctx,
 	email: string,
 	now = Date.now(),
+	scope: { customerId?: string; lookupEmails?: string[] } = {},
 ): Promise<{ token: string; expiresAt: string }> {
 	const token = randomToken();
 	const expiresAt = new Date(now + SESSION_TTL_MS).toISOString();
 	await store<SessionRecord>(ctx, "sessions").put(await sha256Hex(token), {
 		email,
+		customerId: scope.customerId ?? null,
+		lookupEmails: scope.lookupEmails ?? [email],
 		createdAt: new Date(now).toISOString(),
 		expiresAt,
 	});
 	return { token, expiresAt };
 }
 
-export async function getSessionEmail(
+export async function getSessionEmail(ctx: Ctx, token: unknown, now = Date.now()): Promise<string | null> {
+	return (await getSession(ctx, token, now))?.email ?? null;
+}
+
+export async function getSession(
 	ctx: Ctx,
 	token: unknown,
 	now = Date.now(),
-): Promise<string | null> {
+): Promise<SessionIdentity | null> {
 	if (!isTokenShape(token)) return null;
 	const sessions = store<SessionRecord>(ctx, "sessions");
 	const key = await sha256Hex(token);
@@ -85,7 +109,11 @@ export async function getSessionEmail(
 		await sessions.delete(key);
 		return null;
 	}
-	return record.email;
+	return {
+		email: record.email,
+		customerId: record.customerId ?? null,
+		lookupEmails: record.lookupEmails?.length ? record.lookupEmails : [record.email],
+	};
 }
 
 export async function deleteSession(ctx: Ctx, token: unknown): Promise<void> {

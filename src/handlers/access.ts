@@ -5,7 +5,7 @@ import { getStripeConfig } from "../lib/config.js";
 import { type Ctx, fail, type RCtx, requireHttp, store } from "../lib/context.js";
 import { sha256Hex } from "../lib/crypto.js";
 import { getRestrictedProductIds } from "../lib/restrictions.js";
-import { getSessionEmail } from "../lib/sessions.js";
+import { getSession, type SessionIdentity } from "../lib/sessions.js";
 import { StripeClient } from "../lib/stripe.js";
 import { isShortString } from "../lib/validate.js";
 import { body } from "./util.js";
@@ -30,33 +30,38 @@ export async function accessHandler(ctx: RCtx): Promise<AccessResult> {
 	const productIds = await getRestrictedProductIds(ctx, collection, id);
 	if (productIds.length === 0) return { restricted: false, hasAccess: true, productIds: [] };
 
-	const email = await getSessionEmail(ctx, input.session);
-	if (!email) return { restricted: true, hasAccess: false, productIds };
+	const identity = await getSession(ctx, input.session);
+	if (!identity) return { restricted: true, hasAccess: false, productIds };
 
-	const check = await emailHasAccess(ctx, email, productIds);
-	return { restricted: true, hasAccess: check.hasAccess, productIds, email, ...(check.error ? { error: check.error } : {}) };
+	const check = await identityHasAccess(ctx, identity, productIds);
+	const result: AccessResult = { restricted: true, hasAccess: check.hasAccess, productIds, email: identity.email };
+	if (check.error) result.error = check.error;
+	return result;
 }
 
-/** Positive results are cached for five minutes per email + product set; negatives are not. */
-export async function emailHasAccess(
+/**
+ * Positive results are cached for five minutes per Stripe key, session scope, and
+ * product set; negatives are not.
+ */
+export async function identityHasAccess(
 	ctx: Ctx,
-	email: string,
+	identity: SessionIdentity,
 	productIds: readonly string[],
 	now = Date.now(),
 ): Promise<{ hasAccess: boolean; error?: AccessResult["error"] }> {
+	const config = await getStripeConfig(ctx);
+	if (!config) return { hasAccess: false, error: "STRIPE_NOT_CONFIGURED" };
+
 	const cache = store<{ expiresAt: string }>(ctx, "accessCache");
-	const cacheKey = await sha256Hex(`${email}\n${[...productIds].sort().join(",")}`);
+	const scope = identity.customerId ? `customer:${identity.customerId}` : `email:${identity.lookupEmails.join(",")}`;
+	const cacheKey = await sha256Hex(`${config.keyHash}\n${scope}\n${[...productIds].sort().join(",")}`);
 	const cached = await cache.get(cacheKey);
 	if (cached && Date.parse(cached.expiresAt) > now) return { hasAccess: true };
 
-	const config = await getStripeConfig(ctx);
-	if (!config) return { hasAccess: false, error: "STRIPE_NOT_CONFIGURED" };
 	const stripe = new StripeClient(config.secretKey, requireHttp(ctx).fetch);
-
 	try {
-		for (const customer of await stripe.listCustomersByEmail(email)) {
-			if (customer.deleted) continue;
-			if (await stripe.customerHasProduct(customer.id, productIds)) {
+		for (const customerId of await stripe.customersFor(identity)) {
+			if (await stripe.customerHasProduct(customerId, productIds)) {
 				await cache.put(cacheKey, { expiresAt: new Date(now + ACCESS_CACHE_TTL_MS).toISOString() });
 				return { hasAccess: true };
 			}

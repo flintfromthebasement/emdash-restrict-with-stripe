@@ -20,6 +20,13 @@ export function normalizeEmail(value: unknown): string | null {
 	return EMAIL_PATTERN.test(email) ? email : null;
 }
 
+/** The address as typed (trimmed) and lowercased, for Stripe's case-sensitive email filter. */
+export function emailLookupVariants(value: unknown): string[] {
+	const normalized = normalizeEmail(value);
+	if (!normalized || typeof value !== "string") return [];
+	return [...new Set([normalized, value.trim()])];
+}
+
 export function isShortString(value: unknown, max = 200): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= max;
 }

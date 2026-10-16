@@ -26,6 +26,14 @@ export const PAYWALL_CSS = String.raw`
 .rwstripe-paywall [hidden] { display: none !important; }
 `;
 
+export const ONE_TIME_PARAMS = ["rwstripe_checkout", "rwstripe_login"] as const;
+
+/**
+ * Runs in <head> on every content page: moves one-time Checkout and login values out
+ * of the address bar before later scripts (analytics) can read the URL.
+ */
+export const EARLY_JS = String.raw`(function(){try{var u=new URL(location.href),p={},n=0;["rwstripe_checkout","rwstripe_login"].forEach(function(k){var v=u.searchParams.get(k);if(v!==null){p[k]=v;u.searchParams.delete(k);n++;}});if(n){window.__rwstripeParams=p;history.replaceState(history.state,"",u.pathname+u.search+u.hash);}}catch(e){}})();`;
+
 /** Runs in <head> on entries that were restricted at render time, to avoid a flash of content. */
 export const PENDING_JS = String.raw`(function(){var r=document.documentElement;r.classList.add("rwstripe-pending");setTimeout(function(){r.classList.remove("rwstripe-pending");},8000);})();`;
 
@@ -73,8 +81,15 @@ export const PAYWALL_JS = String.raw`
     return url.pathname + url.search;
   }
 
-  // Read a one-time URL parameter and remove it from the address bar and history.
+  // Read a one-time URL parameter (already moved aside by the head script, or still in
+  // the URL if that script did not run) and remove it from the address bar and history.
   function takeParam(name) {
+    var early = window.__rwstripeParams;
+    if (early && Object.prototype.hasOwnProperty.call(early, name)) {
+      var stashed = early[name];
+      delete early[name];
+      return stashed;
+    }
     var url = new URL(location.href);
     var value = url.searchParams.get(name);
     if (value === null) return null;

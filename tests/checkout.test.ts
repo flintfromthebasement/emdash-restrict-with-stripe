@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { CHECKOUT_MAX_AGE_MS, checkoutCompleteHandler, checkoutHandler, verifyCheckoutSession } from "../src/handlers/checkout.js";
+import { accessHandler } from "../src/handlers/access.js";
+import { portalHandler } from "../src/handlers/portal.js";
 import { getSessionEmail } from "../src/lib/sessions.js";
 import type { StripeCheckoutSession } from "../src/lib/stripe.js";
 import { createHarness, stripeFetch } from "./support/fake-ctx.js";
@@ -31,7 +33,7 @@ async function harnessWithStripe(routes: Parameters<typeof stripeFetch>[0], inpu
 
 describe("verifyCheckoutSession", () => {
 	it("accepts a fresh, paid session started by the plugin and prefers the customer's email", () => {
-		expect(verifyCheckoutSession(session())).toEqual({ ok: true, email: "buyer@example.test" });
+		expect(verifyCheckoutSession(session())).toEqual({ ok: true, email: "buyer@example.test", customerId: "cus_1" });
 	});
 	it("accepts no_payment_required (free trials)", () => {
 		expect(verifyCheckoutSession(session({ payment_status: "no_payment_required" })).ok).toBe(true);
@@ -51,10 +53,11 @@ describe("verifyCheckoutSession", () => {
 		expect(verifyCheckoutSession(session({ created }), now)).toMatchObject({ code: "CHECKOUT_EXPIRED" });
 	});
 	it("falls back to customer_details when the customer is not expanded", () => {
-		expect(verifyCheckoutSession(session({ customer: "cus_1" }))).toEqual({ ok: true, email: "other@example.test" });
+		expect(verifyCheckoutSession(session({ customer: "cus_1" }))).toEqual({ ok: true, email: "other@example.test", customerId: "cus_1" });
 	});
-	it("requires an email", () => {
-		expect(verifyCheckoutSession(session({ customer: null, customer_details: null }))).toMatchObject({ code: "CHECKOUT_NO_EMAIL" });
+	it("requires a customer and an email", () => {
+		expect(verifyCheckoutSession(session({ customer: null }))).toMatchObject({ code: "CHECKOUT_NO_CUSTOMER" });
+		expect(verifyCheckoutSession(session({ customer: "cus_1", customer_details: null }))).toMatchObject({ code: "CHECKOUT_NO_EMAIL" });
 	});
 });
 
@@ -87,6 +90,32 @@ describe("checkout/complete", () => {
 	});
 });
 
+describe("checkout sessions are scoped to the Checkout customer", () => {
+	it("do not grant what other customers with the same email bought, or open their portal", async () => {
+		const subscriptionsFor: Record<string, unknown[]> = {
+			cus_attacker: [],
+			cus_victim: [{ status: "active", items: { data: [{ price: { product: "prod_A" } }] } }],
+		};
+		const portals: string[] = [];
+		const h = await harnessWithStripe({
+			"GET /checkout/sessions/cs_test_abc123": () => session({ customer: { id: "cus_attacker", email: "victim@example.test" } }),
+			"GET /customers": () => ({ data: [{ id: "cus_victim", email: "victim@example.test" }, { id: "cus_attacker", email: "victim@example.test" }], has_more: false }),
+			"GET /subscriptions": (_body, url) => ({ data: subscriptionsFor[url.searchParams.get("customer")!] ?? [], has_more: false }),
+			"GET /invoices": () => ({ data: [], has_more: false }),
+			"GET /billing_portal/configurations": () => ({ data: [{ id: "bpc_1", is_default: true }], has_more: false }),
+			"POST /billing_portal/sessions": (body) => {
+				portals.push(body.get("customer")!);
+				return { url: "https://billing.stripe.com/p/session/x" };
+			},
+		});
+		await h.stores.restrictions.put("posts:01ABC", { collectionSlug: "posts", contentId: "01ABC", productIds: ["prod_A"], updatedAt: "" });
+		const { session: token } = await checkoutCompleteHandler(h.withInput({ session_id: "cs_test_abc123" }));
+		expect(await accessHandler(h.withInput({ collection: "posts", id: "01ABC", session: token }))).toMatchObject({ hasAccess: false });
+		await portalHandler(h.withInput({ session: token, return_path: "/" }));
+		expect(portals).toEqual(["cus_attacker"]);
+	});
+});
+
 describe("checkout", () => {
 	const product = { id: "prod_A", active: true, name: "Gold", description: null, default_price: "price_1" };
 	const routes = (type: "one_time" | "recurring") => ({
@@ -99,7 +128,7 @@ describe("checkout", () => {
 			recurring: type === "recurring" ? { interval: "month", interval_count: 1 } : null,
 			product,
 		}),
-		"GET /customers": () => ({ data: [], has_more: false }),
+		"GET /customers": () => ({ data: [{ id: "cus_victim", email: "buyer@example.test" }], has_more: false }),
 		"POST /customers": () => ({ id: "cus_new", email: "buyer@example.test" }),
 		"POST /checkout/sessions": () => ({ id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1" }),
 	});
@@ -117,11 +146,13 @@ describe("checkout", () => {
 		expect(create.body.get("mode")).toBe("payment");
 		expect(create.body.get("invoice_creation[enabled]")).toBe("true");
 		expect(create.body.get("metadata[rwstripe]")).toBe("1");
-		expect(create.body.get("customer")).toBe("cus_new");
+		expect(create.body.get("customer_creation")).toBe("always");
+		expect(create.body.get("customer_email")).toBe("buyer@example.test");
+		// An unverified buyer is never attached to an existing customer with that email.
+		expect(create.body.has("customer")).toBe(false);
+		expect(h.calls.some((call) => call.path === "/customers")).toBe(false);
 		expect(create.body.get("success_url")).toBe("https://example.test/posts/gold?x=1&rwstripe_checkout={CHECKOUT_SESSION_ID}");
 		expect(create.body.get("cancel_url")).toBe("https://example.test/posts/gold?x=1");
-		const customer = h.calls.find((call) => call.method === "POST" && call.path === "/customers")!;
-		expect(customer.body.get("email")).toBe("buyer@example.test");
 	});
 
 	it("uses subscription mode for recurring prices", async () => {
@@ -131,6 +162,8 @@ describe("checkout", () => {
 		const create = h.calls.find((call) => call.method === "POST" && call.path === "/checkout/sessions")!;
 		expect(create.body.get("mode")).toBe("subscription");
 		expect(create.body.has("invoice_creation[enabled]")).toBe(false);
+		expect(create.body.has("customer_creation")).toBe(false);
+		expect(create.body.has("customer")).toBe(false);
 	});
 
 	it("refuses prices whose product restricts nothing", async () => {

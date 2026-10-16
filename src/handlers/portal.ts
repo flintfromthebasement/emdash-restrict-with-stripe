@@ -2,7 +2,7 @@
 
 import { PORTAL_CONFIG_KEY, requireStripe } from "../lib/config.js";
 import { fail, type RCtx, requireSiteOrigin } from "../lib/context.js";
-import { getSessionEmail } from "../lib/sessions.js";
+import { getSession } from "../lib/sessions.js";
 import { validateReturnPath } from "../lib/validate.js";
 import { body, stripeCall } from "./util.js";
 
@@ -11,13 +11,13 @@ export async function portalHandler(ctx: RCtx): Promise<{ url: string }> {
 	const siteOrigin = requireSiteOrigin(ctx);
 	const returnPath = validateReturnPath(input.return_path, siteOrigin);
 	if (!returnPath) fail("INVALID_RETURN_PATH", "return_path must be a path on this site.");
-	const email = await getSessionEmail(ctx, input.session);
-	if (!email) fail("NOT_LOGGED_IN", "Log in to manage your purchases.", 401);
+	const identity = await getSession(ctx, input.session);
+	if (!identity) fail("NOT_LOGGED_IN", "Log in to manage your purchases.", 401);
 
 	const { config, stripe } = await requireStripe(ctx);
-	const customers = await stripeCall(ctx, "customer lookup", () => stripe.listCustomersByEmail(email));
-	const customer = customers.find((candidate) => !candidate.deleted);
-	if (!customer) fail("NO_CUSTOMER", "No purchases were found for this email.", 404);
+	const customers = await stripeCall(ctx, "customer lookup", () => stripe.customersFor(identity));
+	const customerId = customers[0];
+	if (!customerId) fail("NO_CUSTOMER", "No purchases were found for this email.", 404);
 
 	// Cached per key so a different Stripe account never reuses another's configuration.
 	const cached = await ctx.kv.get<{ keyHash: string; id: string }>(PORTAL_CONFIG_KEY);
@@ -28,7 +28,7 @@ export async function portalHandler(ctx: RCtx): Promise<{ url: string }> {
 	}
 	const configurationId = configuration;
 	const portal = await stripeCall(ctx, "portal session", () =>
-		stripe.createPortalSession(customer.id, `${siteOrigin}${returnPath}`, configurationId),
+		stripe.createPortalSession(customerId, `${siteOrigin}${returnPath}`, configurationId),
 	);
 	return { url: portal.url };
 }

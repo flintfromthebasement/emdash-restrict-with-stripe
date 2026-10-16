@@ -79,6 +79,20 @@ export class StripeClient {
 		private readonly fetchFn: FetchFn,
 	) {}
 
+	/** Follow `has_more` with `starting_after`, up to `maxPages` pages of 100. */
+	private async listAll<T extends { id?: string }>(path: string, params: Params, maxPages = 10): Promise<T[]> {
+		const items: T[] = [];
+		let startingAfter: string | undefined;
+		for (let page = 0; page < maxPages; page++) {
+			const list = await this.request<StripeList<T>>("GET", path, { ...params, limit: "100", starting_after: startingAfter });
+			items.push(...list.data);
+			const last = list.data[list.data.length - 1]?.id;
+			if (!list.has_more || !last) break;
+			startingAfter = last;
+		}
+		return items;
+	}
+
 	private async request<T>(method: "GET" | "POST", path: string, params: Params = {}): Promise<T> {
 		const query = new URLSearchParams();
 		for (const [key, value] of Object.entries(params)) {
@@ -144,8 +158,19 @@ export class StripeClient {
 		return list.data;
 	}
 
-	createCustomer(email: string): Promise<StripeCustomer> {
-		return this.request("POST", "/customers", { email });
+	/**
+	 * Customers a session may act for: only its own customer for Checkout sessions,
+	 * otherwise every live customer matching one of the email spellings.
+	 */
+	async customersFor(identity: { customerId: string | null; lookupEmails: string[] }): Promise<string[]> {
+		if (identity.customerId) return [identity.customerId];
+		const ids = new Set<string>();
+		for (const email of identity.lookupEmails) {
+			for (const customer of await this.listCustomersByEmail(email)) {
+				if (!customer.deleted) ids.add(customer.id);
+			}
+		}
+		return [...ids];
 	}
 
 	createCheckoutSession(params: Params): Promise<StripeCheckoutSession> {
@@ -197,10 +222,11 @@ export class StripeClient {
 		if (!customerId || productIds.length === 0) return false;
 		const wanted = new Set(productIds);
 
-		const subs = await this.request<
-			StripeList<{ status: string; items?: { data?: LineLike[] } }>
-		>("GET", "/subscriptions", { customer: customerId, status: "all", limit: "100" });
-		for (const sub of subs.data) {
+		const subs = await this.listAll<{ id?: string; status: string; items?: { data?: LineLike[] } }>(
+			"/subscriptions",
+			{ customer: customerId, status: "all" },
+		);
+		for (const sub of subs) {
 			if (sub.status !== "active" && sub.status !== "trialing") continue;
 			for (const item of sub.items?.data ?? []) {
 				const product = productIdOf(item);
@@ -208,14 +234,13 @@ export class StripeClient {
 			}
 		}
 
-		const invoices = await this.request<
-			StripeList<{
-				subscription?: string | null;
-				metadata?: Record<string, string> | null;
-				lines?: { data?: LineLike[] };
-			}>
-		>("GET", "/invoices", { customer: customerId, status: "paid", limit: "100" });
-		for (const invoice of invoices.data) {
+		const invoices = await this.listAll<{
+			id?: string;
+			subscription?: string | null;
+			metadata?: Record<string, string> | null;
+			lines?: { data?: LineLike[] };
+		}>("/invoices", { customer: customerId, status: "paid" });
+		for (const invoice of invoices) {
 			if (invoice.subscription) continue;
 			if (invoice.metadata?.["rwstripe-ignore"]) continue;
 			for (const line of invoice.lines?.data ?? []) {
